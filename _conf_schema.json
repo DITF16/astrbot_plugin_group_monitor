@@ -4,5 +4,11 @@
         "type": "list",
         "default": [],
         "hint": "接收退群通知的群号列表"
+    },
+    "monitored_groups": {
+        "description": "监控群配置列表",
+        "type": "list",
+        "default": [],
+        "hint": "自动生成的配置，格式为 '监控群号:通知群号'，请勿手动修改"
     }
 }

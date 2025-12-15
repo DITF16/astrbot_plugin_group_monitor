@@ -18,6 +18,31 @@ class GroupMonitorPlugin(Star):
         super().__init__(context)
         self.config = config
 
+        # 初始化时，将配置中的 list 转换为 dict 方便操作
+        # 存储格式: ["monitor_id:notify_id", ...]
+        # 运行格式: {monitor_id: notify_id, ...}
+        self.monitored_map = {}
+        raw_list = self.config.get("monitored_groups", [])
+        for item in raw_list:
+            if isinstance(item, str) and ":" in item:
+                m_gid, n_gid = item.split(":", 1)
+                self.monitored_map[m_gid] = n_gid
+
+    def _save_monitored_map(self):
+        """将字典转换回列表格式并保存到配置文件"""
+        save_list = [f"{k}:{v}" for k, v in self.monitored_map.items()]
+        self.config["monitored_groups"] = save_list
+        self.config.save_config()
+
+    async def _safe_get_group_name(self, event, group_id):
+        """安全获取群名称，失败返回未知"""
+        try:
+            # 使用用户提供的 API 范式
+            group_info = await event.get_group(group_id)
+            return f"{group_info.group_name}({group_id})"
+        except Exception:
+            return f"未知群聊({group_id})"
+
     @filter.command("群变动菜单")
     async def show_menu(self, event: AiocqhttpMessageEvent):
         """显示群变动监控插件的帮助菜单"""
@@ -44,12 +69,9 @@ class GroupMonitorPlugin(Star):
             return
 
         msg_lines = ["【通知群列表】"]
-
-        # 遍历获取群名称
         for gid in notif_groups:
-            g_name = await event.get_group(gid)
-            g_name = g_name.group_name
-            msg_lines.append(f"- {g_name}({gid})")
+            name_str = await self._safe_get_group_name(event, gid)
+            msg_lines.append(f"- {name_str}")
 
         yield event.plain_result("\n".join(msg_lines))
 
@@ -69,10 +91,8 @@ class GroupMonitorPlugin(Star):
             self.config["notification_groups"] = notif_groups
             self.config.save_config()
 
-            # 获取一下群名方便反馈
-            g_name = await event.get_group(group_id)
-            g_name = g_name.group_name
-            yield event.plain_result(f"已添加群 {g_name}({group_id}) 到通知列表。")
+            name_str = await self._safe_get_group_name(event, group_id)
+            yield event.plain_result(f"已添加群 {name_str} 到通知列表。")
 
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("删除通知群")
@@ -91,36 +111,31 @@ class GroupMonitorPlugin(Star):
     @filter.command("监控群列表")
     async def list_monitored_groups(self, event: AiocqhttpMessageEvent):
         """查看所有被监控的群，按通知群分组"""
-        monitored_map = self.config.get("monitored_groups", {})  # {monitor_gid: notify_gid}
-        if not monitored_map:
+        if not self.monitored_map:
             yield event.plain_result("当前没有设置任何监控群。")
             return
 
         # 按通知群分组
         grouped = {}  # {notify_gid: [monitor_gid, ...]}
-        for mon_gid, not_gid in monitored_map.items():
+        for mon_gid, not_gid in self.monitored_map.items():
             if not_gid not in grouped:
                 grouped[not_gid] = []
             grouped[not_gid].append(mon_gid)
 
         msg_lines = ["【监控群列表】"]
 
-        # 显示分组信息
         for not_gid, mon_list in grouped.items():
             # 获取通知群名称
-            not_name = await event.get_group(not_gid)
-            not_name = not_name.group_name
-            msg_lines.append(f"\n通知群: {not_name}({not_gid})")
+            not_name_str = await self._safe_get_group_name(event, not_gid)
+            msg_lines.append(f"\n通知群: {not_name_str}")
 
             for m_gid in mon_list:
                 # 获取监控群名称
-                m_name = await event.get_group(m_gid)
-                m_name = m_name.group_name
-                msg_lines.append(f"  └─ 监控: {m_name}({m_gid})")
+                m_name_str = await self._safe_get_group_name(event, m_gid)
+                msg_lines.append(f"  └─ 监控: {m_name_str}")
 
-        # 显示所有监控群群号
         msg_lines.append("\n【汇总】")
-        msg_lines.append("所有监控群号: " + ", ".join(monitored_map.keys()))
+        msg_lines.append("所有监控群号: " + ", ".join(self.monitored_map.keys()))
 
         yield event.plain_result("\n".join(msg_lines))
 
@@ -139,40 +154,35 @@ class GroupMonitorPlugin(Star):
         monitor_gid = str(monitor_gid)
         notify_gid = str(notify_gid)
 
-        # 更新监控映射
-        monitored_map = self.config.get("monitored_groups", {})
-        monitored_map[monitor_gid] = notify_gid
-        self.config["monitored_groups"] = monitored_map
+        # 更新字典并保存
+        self.monitored_map[monitor_gid] = notify_gid
+        self._save_monitored_map()
 
         # 获取名称以便反馈
-        m_name = await event.get_group(monitor_gid)
-        m_name = m_name.group_name
-        n_name = await event.get_group(notify_gid)
-        n_name = n_name.group_name
+        m_name_str = await self._safe_get_group_name(event, monitor_gid)
+        n_name_str = await self._safe_get_group_name(event, notify_gid)
 
-        msg = f"已添加对群 {m_name}({monitor_gid}) 的监控，通知将发送至 {n_name}({notify_gid})。"
+        msg = f"已添加对群 {m_name_str} 的监控，通知将发送至 {n_name_str}。"
 
         # 检查通知群是否在列表中，不在则添加
         notif_groups = self.config.get("notification_groups", [])
         if notify_gid not in notif_groups:
             notif_groups.append(notify_gid)
             self.config["notification_groups"] = notif_groups
-            msg += f"\n(检测到 {n_name} 不在通知列表中，已自动添加)"
+            self.config.save_config()
+            msg += f"\n(检测到通知群不在列表中，已自动添加)"
 
-        self.config.save_config()
         yield event.plain_result(msg)
 
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("删除监控群")
     async def del_monitored_group(self, event: AiocqhttpMessageEvent, monitor_gid: str):
         """删除对某群的监控"""
-        monitored_map = self.config.get("monitored_groups", {})
         monitor_gid = str(monitor_gid)
 
-        if monitor_gid in monitored_map:
-            del monitored_map[monitor_gid]
-            self.config["monitored_groups"] = monitored_map
-            self.config.save_config()
+        if monitor_gid in self.monitored_map:
+            del self.monitored_map[monitor_gid]
+            self._save_monitored_map()
             yield event.plain_result(f"已停止监控群 {monitor_gid}。")
         else:
             yield event.plain_result(f"群 {monitor_gid} 当前未被监控。")
@@ -184,7 +194,6 @@ class GroupMonitorPlugin(Star):
         if event.get_platform_name() != "aiocqhttp":
             return
 
-        # AstrBot 将原始事件数据存储在 message_obj.raw_message 中
         raw_data = event.message_obj.raw_message
         if not isinstance(raw_data, dict):
             return
@@ -203,20 +212,18 @@ class GroupMonitorPlugin(Star):
         sub_type = raw_data.get("sub_type", "")  # leave, kick, kick_me
 
         # 检查该群是否在监控列表中
-        monitored_map = self.config.get("monitored_groups", {})
-        if group_id not in monitored_map:
+        if group_id not in self.monitored_map:
             return
 
-        target_notify_gid = monitored_map[group_id]
-
+        target_notify_gid = self.monitored_map[group_id]
         client = event.bot
         nickname = "未知用户"
 
         # 1. 获取退群群聊名称
-        a = await event.get_group(group_id)
-        group_name = a.group_name
+        # 这里使用 event.get_group 可能会因为机器人被踢出而失败，加 try-except
+        group_name_str = await self._safe_get_group_name(event, group_id)
 
-        # 2. 尝试获取退群者信息（需要异步调用）
+        # 2. 尝试获取退群者信息
         try:
             info = await client.get_stranger_info(user_id=int(user_id))
             nickname = info.get("nickname", "未知昵称")
@@ -225,7 +232,6 @@ class GroupMonitorPlugin(Star):
 
         # 构建通知消息
         leave_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
         reason = "主动退群"
         if sub_type == "kick":
             reason = f"被管理员({operator_id})踢出"
@@ -235,7 +241,7 @@ class GroupMonitorPlugin(Star):
         msg = (
             f"【群成员变动通知】\n"
             f"时间: {leave_time}\n"
-            f"退群群聊: {group_name}({group_id})\n"
+            f"退群群聊: {group_name_str}\n"
             f"用户QQ: {user_id}\n"
             f"用户昵称: {nickname}\n"
             f"变动类型: {reason}"
