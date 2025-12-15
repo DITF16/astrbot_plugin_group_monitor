@@ -18,9 +18,8 @@ class GroupMonitorPlugin(Star):
         super().__init__(context)
         self.config = config
 
-        # 初始化时，将配置中的 list 转换为 dict 方便操作
-        # 存储格式: ["monitor_id:notify_id", ...]
-        # 运行格式: {monitor_id: notify_id, ...}
+        # 初始化监控映射
+        # 将配置中的 list ["monitor:notify"] 转换为 dict {monitor: notify}
         self.monitored_map = {}
         raw_list = self.config.get("monitored_groups", [])
         for item in raw_list:
@@ -29,15 +28,23 @@ class GroupMonitorPlugin(Star):
                 self.monitored_map[m_gid] = n_gid
 
     def _save_monitored_map(self):
-        """将字典转换回列表格式并保存到配置文件"""
+        """将内存中的字典转换回列表格式并保存到配置文件"""
         save_list = [f"{k}:{v}" for k, v in self.monitored_map.items()]
         self.config["monitored_groups"] = save_list
         self.config.save_config()
 
+    def _is_admin(self, event: AiocqhttpMessageEvent) -> bool:
+        """检查发送者是否在管理员列表中"""
+        sender_id = str(event.get_sender_id())
+        # 获取配置中的管理员列表，并将所有 ID 转为字符串进行比对
+        admin_list = [str(uid) for uid in self.config.get("admins", [])]
+
+        # 也可以保留超级管理员权限(可选): if event.is_admin(): return True
+        return sender_id in admin_list
+
     async def _safe_get_group_name(self, event, group_id):
         """安全获取群名称，失败返回未知"""
         try:
-            # 使用用户提供的 API 范式
             group_info = await event.get_group(group_id)
             return f"{group_info.group_name}({group_id})"
         except Exception:
@@ -59,10 +66,13 @@ class GroupMonitorPlugin(Star):
         )
         yield event.plain_result(menu)
 
-    @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("通知群列表")
     async def list_notification_groups(self, event: AiocqhttpMessageEvent):
         """查看所有接收通知的群"""
+        if not self._is_admin(event):
+            yield event.plain_result("🚫 暂无权限，请联系管理员添加您的QQ号到配置列表。")
+            return
+
         notif_groups = self.config.get("notification_groups", [])
         if not notif_groups:
             yield event.plain_result("当前没有设置任何通知群。")
@@ -75,10 +85,13 @@ class GroupMonitorPlugin(Star):
 
         yield event.plain_result("\n".join(msg_lines))
 
-    @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("添加通知群")
     async def add_notification_group(self, event: AiocqhttpMessageEvent, group_id: str):
         """添加一个群到通知列表"""
+        if not self._is_admin(event):
+            yield event.plain_result("🚫 暂无权限")
+            return
+
         if not group_id:
             yield event.plain_result("请提供群号，例如：/添加通知群 123456789")
             return
@@ -94,10 +107,13 @@ class GroupMonitorPlugin(Star):
             name_str = await self._safe_get_group_name(event, group_id)
             yield event.plain_result(f"已添加群 {name_str} 到通知列表。")
 
-    @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("删除通知群")
     async def del_notification_group(self, event: AiocqhttpMessageEvent, group_id: str):
         """从通知列表中删除一个群"""
+        if not self._is_admin(event):
+            yield event.plain_result("🚫 暂无权限")
+            return
+
         notif_groups = self.config.get("notification_groups", [])
         if group_id in notif_groups:
             notif_groups.remove(str(group_id))
@@ -107,16 +123,19 @@ class GroupMonitorPlugin(Star):
         else:
             yield event.plain_result(f"群 {group_id} 不在通知列表中。")
 
-    @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("监控群列表")
     async def list_monitored_groups(self, event: AiocqhttpMessageEvent):
         """查看所有被监控的群，按通知群分组"""
+        if not self._is_admin(event):
+            yield event.plain_result("🚫 暂无权限")
+            return
+
         if not self.monitored_map:
             yield event.plain_result("当前没有设置任何监控群。")
             return
 
         # 按通知群分组
-        grouped = {}  # {notify_gid: [monitor_gid, ...]}
+        grouped = {}
         for mon_gid, not_gid in self.monitored_map.items():
             if not_gid not in grouped:
                 grouped[not_gid] = []
@@ -139,10 +158,13 @@ class GroupMonitorPlugin(Star):
 
         yield event.plain_result("\n".join(msg_lines))
 
-    @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("添加监控群")
     async def add_monitored_group(self, event: AiocqhttpMessageEvent, monitor_gid: str, notify_gid: str = None):
         """添加监控群，必须指定通知群"""
+        if not self._is_admin(event):
+            yield event.plain_result("🚫 暂无权限")
+            return
+
         if not monitor_gid:
             yield event.plain_result("请指定监控群号。")
             return
@@ -174,10 +196,13 @@ class GroupMonitorPlugin(Star):
 
         yield event.plain_result(msg)
 
-    @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("删除监控群")
     async def del_monitored_group(self, event: AiocqhttpMessageEvent, monitor_gid: str):
         """删除对某群的监控"""
+        if not self._is_admin(event):
+            yield event.plain_result("🚫 暂无权限")
+            return
+
         monitor_gid = str(monitor_gid)
 
         if monitor_gid in self.monitored_map:
@@ -190,7 +215,8 @@ class GroupMonitorPlugin(Star):
     # 监听所有消息事件，从中筛选出群成员减少的 Notice 事件
     @filter.event_message_type(filter.EventMessageType.ALL)
     async def on_group_decrease(self, event: AiocqhttpMessageEvent):
-        # 确保是 aiocqhttp 平台
+        # 鉴权：事件处理不需要检查管理员权限，因为这是自动触发的功能
+
         if event.get_platform_name() != "aiocqhttp":
             return
 
@@ -205,11 +231,10 @@ class GroupMonitorPlugin(Star):
         if post_type != "notice" or notice_type != "group_decrease":
             return
 
-        # 获取相关ID
         group_id = str(raw_data.get("group_id", ""))
         user_id = str(raw_data.get("user_id", ""))
         operator_id = str(raw_data.get("operator_id", ""))
-        sub_type = raw_data.get("sub_type", "")  # leave, kick, kick_me
+        sub_type = raw_data.get("sub_type", "")
 
         # 检查该群是否在监控列表中
         if group_id not in self.monitored_map:
@@ -220,7 +245,6 @@ class GroupMonitorPlugin(Star):
         nickname = "未知用户"
 
         # 1. 获取退群群聊名称
-        # 这里使用 event.get_group 可能会因为机器人被踢出而失败，加 try-except
         group_name_str = await self._safe_get_group_name(event, group_id)
 
         # 2. 尝试获取退群者信息

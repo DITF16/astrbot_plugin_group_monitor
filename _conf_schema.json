@@ -10,5 +10,11 @@
         "type": "list",
         "default": [],
         "hint": "自动生成的配置，格式为 '监控群号:通知群号'，请勿手动修改"
+    },
+    "admins": {
+        "description": "插件管理员列表",
+        "type": "list",
+        "default": [],
+        "hint": "允许使用管理指令的用户QQ号列表"
     }
 }
