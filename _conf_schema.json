@@ -1,0 +1,8 @@
+{
+    "notification_groups": {
+        "description": "通知群列表",
+        "type": "list",
+        "default": [],
+        "hint": "接收退群通知的群号列表"
+    }
+}
